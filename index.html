@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>黑洞吞噬城市</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 主游戏容器 -->
+  <div id="game-container">
+    <!-- 游戏画布，所有元素通过 Canvas 绘制 -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- 顶部 HUD：实时显示分数、黑洞大小、剩余时间 -->
+    <div id="hud">
+      <div class="hud-item">
+        <span class="hud-label">分数</span>
+        <span id="score" class="hud-value">0</span>
+      </div>
+      <div class="hud-item">
+        <span class="hud-label">黑洞半径</span>
+        <span id="radius" class="hud-value">20</span>
+      </div>
+      <div class="hud-item">
+        <span class="hud-label">剩余时间</span>
+        <span id="timer" class="hud-value">90</span>
+        <span class="hud-unit">秒</span>
+      </div>
+    </div>
+
+    <!-- 开始画面 -->
+    <div id="start-screen" class="overlay">
+      <!-- 星空 + 黑洞动画背景层 -->
+      <canvas id="start-bg"></canvas>
+
+      <!-- 前景内容 -->
+      <div class="start-content">
+        <h1 class="start-title">黑洞吞噬城市</h1>
+        <p class="subtitle">控制黑洞吞噬城市中的一切！</p>
+
+        <div class="controls-info">
+          <div class="control-row">
+            <span class="control-icon">🎮</span>
+            <span class="control-text">WASD / 方向键 移动黑洞</span>
+          </div>
+          <div class="control-row">
+            <span class="control-icon">⏱️</span>
+            <span class="control-text">90秒内挑战最高分</span>
+          </div>
+        </div>
+
+        <button id="startBtn" class="btn">开始游戏</button>
+      </div>
+    </div>
+
+    <!-- 游戏结束画面 -->
+    <div id="end-screen" class="overlay hidden">
+      <h1>游戏结束</h1>
+      <div class="final-stats">
+        <p>最终分数：<span id="final-score">0</span></p>
+        <p>黑洞半径：<span id="final-radius">0</span></p>
+        <p>吞噬数量：<span id="final-count">0</span></p>
+      </div>
+      <p class="restart-hint">按 空格键 或点击下方按钮重新开始</p>
+      <button id="restartBtn" class="btn">再来一局</button>
+    </div>
+  </div>
+
+  <!-- 开始界面动画脚本（独立于游戏逻辑） -->
+  <script>
+  (function() {
+    const c = document.getElementById('start-bg');
+    const x = c.getContext('2d');
+    let stars = [], rafId = 0;
+
+    function resize() {
+      c.width = window.innerWidth;
+      c.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // 生成星空粒子
+    for (let i = 0; i < 150; i++) {
+      stars.push({
+        x: Math.random() * window.innerWidth,
+        y: Math.random() * window.innerHeight,
+        s: 0.5 + Math.random() * 1.5,
+        t: Math.random() * Math.PI * 2,
+        sp: 0.01 + Math.random() * 0.03
+      });
+    }
+
+    function animate() {
+      const W = c.width, H = c.height;
+      const cx = W / 2, cy = H / 2;
+      const t = Date.now() * 0.001;
+
+      // 深蓝渐变背景
+      const bg = x.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, '#0a0a2e');
+      bg.addColorStop(0.5, '#0f1040');
+      bg.addColorStop(1, '#050520');
+      x.fillStyle = bg;
+      x.fillRect(0, 0, W, H);
+
+      // 闪烁星空
+      for (const s of stars) {
+        s.t += s.sp;
+        x.globalAlpha = 0.2 + 0.6 * (0.5 + 0.5 * Math.sin(s.t));
+        x.fillStyle = '#e0d0ff';
+        x.beginPath();
+        x.arc(s.x, s.y, s.s, 0, Math.PI * 2);
+        x.fill();
+      }
+      x.globalAlpha = 1;
+
+      // 黑洞位置（屏幕中心偏下，给标题留空间）
+      const bx = cx, by = cy + H * 0.08;
+      const R = Math.min(W, H) * 0.1;
+
+      // 引力范围光圈
+      const g = x.createRadialGradient(bx, by, R * 0.5, bx, by, R * 3);
+      g.addColorStop(0, 'rgba(128,0,255,0.08)');
+      g.addColorStop(0.5, 'rgba(80,30,200,0.03)');
+      g.addColorStop(1, 'rgba(50,20,150,0)');
+      x.fillStyle = g;
+      x.beginPath();
+      x.arc(bx, by, R * 3, 0, Math.PI * 2);
+      x.fill();
+
+      // 旋转吸积盘（椭圆）
+      x.save();
+      x.translate(bx, by);
+      x.rotate(t * 0.3);
+      x.scale(1, 0.4);
+      const dg = x.createRadialGradient(0, 0, R * 0.8, 0, 0, R * 2.5);
+      dg.addColorStop(0, 'rgba(180,80,255,0)');
+      dg.addColorStop(0.3, 'rgba(140,50,255,0.25)');
+      dg.addColorStop(0.6, 'rgba(80,30,200,0.15)');
+      dg.addColorStop(1, 'rgba(50,20,150,0)');
+      x.fillStyle = dg;
+      x.beginPath();
+      x.arc(0, 0, R * 2.5, 0, Math.PI * 2);
+      x.fill();
+      x.restore();
+
+      // 反向旋转光环
+      x.save();
+      x.translate(bx, by);
+      x.rotate(-t * 0.5);
+      const rg = x.createRadialGradient(0, 0, R, 0, 0, R * 1.5);
+      rg.addColorStop(0, 'rgba(100,100,255,0)');
+      rg.addColorStop(0.5, 'rgba(150,80,255,0.3)');
+      rg.addColorStop(1, 'rgba(100,50,255,0)');
+      x.fillStyle = rg;
+      x.beginPath();
+      x.arc(0, 0, R * 1.5, 0, Math.PI * 2);
+      x.fill();
+      x.restore();
+
+      // 黑洞核心发光边缘
+      const eg = x.createRadialGradient(bx, by, R * 0.7, bx, by, R * 1.15);
+      eg.addColorStop(0, 'rgba(0,0,0,1)');
+      eg.addColorStop(0.7, 'rgba(80,20,180,0.5)');
+      eg.addColorStop(1, 'rgba(120,50,255,0)');
+      x.fillStyle = eg;
+      x.beginPath();
+      x.arc(bx, by, R * 1.15, 0, Math.PI * 2);
+      x.fill();
+
+      // 纯黑核心
+      x.fillStyle = '#000';
+      x.beginPath();
+      x.arc(bx, by, R, 0, Math.PI * 2);
+      x.fill();
+
+      rafId = requestAnimationFrame(animate);
+    }
+    animate();
+
+    // 游戏开始时停止动画
+    document.getElementById('startBtn').addEventListener('click', function() {
+      cancelAnimationFrame(rafId);
+    });
+  })();
+  </script>
+
+  <script src="game.js"></script>
+</body>
+</html>
