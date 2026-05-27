@@ -27,12 +27,10 @@ const EDGE_REMOVAL_INTERVAL = 4;  // 边缘建筑消失间隔（秒）
 const RAINBOW_SCORE       = 5000; // 分数达到此值时触发彩虹模式
 const PENALTY_BUILDING_MAX  = 2;  // 每局最多生成的减分建筑数量
 const PENALTY_BUILDING_SIZE = 105;// 减分建筑基础尺寸（约大厦1.5倍）
-const PENALTY_SCORE         = 200;// 吞噬减分建筑扣除的分数
-const PENALTY_RADIUS_SHRINK = 0.9;// 吞噬后黑洞半径缩放（缩小10%）
-const PENALTY_SPEED_MULT    = 0.8;// 吞噬后速度缩放（降低20%）
-const PENALTY_DEBUFF_TIME   = 3;  // 速度减益持续时间（秒）
 const PENALTY_REPEL_RANGE   = 260;// 斥力场范围（像素）
 const PENALTY_REPEL_FORCE   = 0.18;// 斥力场强度
+const MAX_BLACK_HOLES       = 4;  // 黑洞最大数量（防止指数爆炸）
+const SPLIT_OFFSET          = 60; // 分裂时两个黑洞的间距
 
 /** 根据时间偏移返回 HSL 彩虹色字符串 */
 function rainbowColor(timeOffset, alpha = 1) {
@@ -40,6 +38,52 @@ function rainbowColor(timeOffset, alpha = 1) {
   return alpha >= 1
     ? `hsl(${hue}, 100%, 60%)`
     : `hsla(${hue}, 100%, 60%, ${alpha})`;
+}
+
+/** 创建黑洞对象（工厂函数，支持分裂） */
+function createBlackHole(x, y, radius, speed) {
+  return {
+    x, y,
+    radius: radius || 20,
+    speed: speed || BASE_SPEED,
+    rotation: 0,
+    vx: 0,
+    vy: 0,
+
+    update(dt) {
+      let dx = 0, dy = 0;
+      if (keys['w'] || keys['arrowup'])    dy -= 1;
+      if (keys['s'] || keys['arrowdown'])  dy += 1;
+      if (keys['a'] || keys['arrowleft'])  dx -= 1;
+      if (keys['d'] || keys['arrowright']) dx += 1;
+
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len > 0) { dx /= len; dy /= len; }
+
+      const effectiveSpeed = this.speed;
+      this.vx += (dx * effectiveSpeed - this.vx) * 0.15;
+      this.vy += (dy * effectiveSpeed - this.vy) * 0.15;
+      this.x += this.vx;
+      this.y += this.vy;
+
+      this.x = Math.max(this.radius, Math.min(WORLD_W - this.radius, this.x));
+      this.y = Math.max(this.radius, Math.min(WORLD_H - this.radius, this.y));
+
+      this.rotation += 0.02 + this.radius * 0.0001;
+    },
+
+    grow(itemSize, itemScore) {
+      const gain = itemSize * GROWTH_RATE;
+      this.radius += gain;
+      this.speed = Math.max(MIN_SPEED, BASE_SPEED * Math.pow(SPEED_DECAY, this.radius - 20));
+      score += itemScore;
+      absorbCount++;
+    },
+
+    getGravityRange() {
+      return this.radius * GRAVITY_FACTOR;
+    }
+  };
 }
 
 // ===================== 城市路网定义 =====================
@@ -90,7 +134,6 @@ let absorbedTypes = new Set(); // 记录已吞噬过的物品类型（用于胜�
 let gemSpawnAcc = 0;           // 宝石生成计时器
 let edgeRemovalAcc = 0;        // 边缘建筑移除计时器
 let edgeRemovalActive = false; // 边缘建筑移除是否已激活
-let speedDebuffTimer  = 0;     // 黑洞速度减益剩余时间（秒）
 
 // ===================== 输入系统 =====================
 const keys = {};
@@ -106,72 +149,44 @@ window.addEventListener('keyup', (e) => {
   keys[e.key.toLowerCase()] = false;
 });
 
-// ===================== 黑洞对象 =====================
-const blackHole = {
-  x: WORLD_W / 2,
-  y: WORLD_H / 2,
-  radius: 20,
-  speed: BASE_SPEED,
-  rotation: 0,          // 光晕旋转角度
-  vx: 0,
-  vy: 0,
+// ===================== 黑洞系统 =====================
+let blackHoles = [];
 
-  /** 根据输入更新黑洞位置 */
-  update(dt) {
-    let dx = 0, dy = 0;
-    if (keys['w'] || keys['arrowup'])    dy -= 1;
-    if (keys['s'] || keys['arrowdown'])  dy += 1;
-    if (keys['a'] || keys['arrowleft'])  dx -= 1;
-    if (keys['d'] || keys['arrowright']) dx += 1;
+/** 获取黑洞质心（用于相机跟随等） */
+function getBlackHolesCentroid() {
+  if (blackHoles.length === 0) return { x: WORLD_W / 2, y: WORLD_H / 2 };
+  let cx = 0, cy = 0;
+  for (const bh of blackHoles) { cx += bh.x; cy += bh.y; }
+  return { x: cx / blackHoles.length, y: cy / blackHoles.length };
+}
 
-    // 对角移动归一化
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len > 0) {
-      dx /= len;
-      dy /= len;
-    }
+/** 获取最大黑洞半径 */
+function getMaxBlackHoleRadius() {
+  let max = 0;
+  for (const bh of blackHoles) if (bh.radius > max) max = bh.radius;
+  return max;
+}
 
-    // 速度减益衰减
-    if (speedDebuffTimer > 0) speedDebuffTimer = Math.max(0, speedDebuffTimer - dt);
-    const effectiveSpeed = this.speed * (speedDebuffTimer > 0 ? PENALTY_SPEED_MULT : 1);
+/** 分裂黑洞（触碰减分建筑时触发） */
+function splitBlackHole(source) {
+  if (blackHoles.length >= MAX_BLACK_HOLES) return;
+  const newRadius = source.radius;
+  const newSpeed  = source.speed;
+  const angle = Math.random() * Math.PI * 2;
+  const offsetX = Math.cos(angle) * SPLIT_OFFSET;
+  const offsetY = Math.sin(angle) * SPLIT_OFFSET;
 
-    // 平滑移动（带惯性）
-    this.vx += (dx * effectiveSpeed - this.vx) * 0.15;
-    this.vy += (dy * effectiveSpeed - this.vy) * 0.15;
-    this.x += this.vx;
-    this.y += this.vy;
+  const bh1 = createBlackHole(source.x - offsetX, source.y - offsetY, newRadius, newSpeed);
+  const bh2 = createBlackHole(source.x + offsetX, source.y + offsetY, newRadius, newSpeed);
+  bh1.vx = source.vx + Math.cos(angle) * 2;
+  bh1.vy = source.vy + Math.sin(angle) * 2;
+  bh2.vx = source.vx - Math.cos(angle) * 2;
+  bh2.vy = source.vy - Math.sin(angle) * 2;
 
-    // 限制在世界边界内
-    this.x = Math.max(this.radius, Math.min(WORLD_W - this.radius, this.x));
-    this.y = Math.max(this.radius, Math.min(WORLD_H - this.radius, this.y));
-
-    // 旋转光晕
-    this.rotation += 0.02 + this.radius * 0.0001;
-  },
-
-  /** 吞噬减分建筑时应用惩罚 */
-  applyPenalty() {
-    score = Math.max(0, score - PENALTY_SCORE);
-    this.radius *= PENALTY_RADIUS_SHRINK;
-    this.speed = Math.max(MIN_SPEED, BASE_SPEED * Math.pow(SPEED_DECAY, this.radius - 20));
-    speedDebuffTimer = PENALTY_DEBUFF_TIME;
-  },
-
-  /** 吞噬物品后增长 */
-  grow(itemSize, itemScore) {
-    const gain = itemSize * GROWTH_RATE;
-    this.radius += gain;
-    // 速度随体积增大而降低
-    this.speed = Math.max(MIN_SPEED, BASE_SPEED * Math.pow(SPEED_DECAY, this.radius - 20));
-    score += itemScore;
-    absorbCount++;
-  },
-
-  /** 获取当前引力范围 */
-  getGravityRange() {
-    return this.radius * GRAVITY_FACTOR;
-  }
-};
+  const idx = blackHoles.indexOf(source);
+  if (idx !== -1) blackHoles.splice(idx, 1);
+  blackHoles.push(bh1, bh2);
+}
 
 // ===================== 相机系统 =====================
 const camera = {
@@ -181,11 +196,12 @@ const camera = {
   shakeY: 0,
   shakeIntensity: 0,
 
-  /** 跟随黑洞，并处理屏幕震动 */
+  /** 跟随黑洞质心，并处理屏幕震动 */
   update() {
-    // 平滑跟随
-    const targetX = blackHole.x - canvas.width / 2;
-    const targetY = blackHole.y - canvas.height / 2;
+    // 平滑跟随所有黑洞的质心
+    const centroid = getBlackHolesCentroid();
+    const targetX = centroid.x - canvas.width / 2;
+    const targetY = centroid.y - canvas.height / 2;
     this.x += (targetX - this.x) * 0.08;
     this.y += (targetY - this.y) * 0.08;
 
@@ -727,12 +743,20 @@ function spawnAbsorbParticles(x, y, color, count) {
 function updateParticles() {
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
-    // 粒子向黑洞中心聚拢
-    const dx = blackHole.x - p.x;
-    const dy = blackHole.y - p.y;
-    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    p.vx += (dx / dist) * 0.08;
-    p.vy += (dy / dist) * 0.08;
+    // 粒子向最近的黑洞聚拢
+    let nearestBh = blackHoles[0];
+    let nearestDist = Infinity;
+    for (const bh of blackHoles) {
+      const d = Math.sqrt((bh.x - p.x) ** 2 + (bh.y - p.y) ** 2);
+      if (d < nearestDist) { nearestDist = d; nearestBh = bh; }
+    }
+    if (nearestBh) {
+      const dx = nearestBh.x - p.x;
+      const dy = nearestBh.y - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      p.vx += (dx / dist) * 0.08;
+      p.vy += (dy / dist) * 0.08;
+    }
     p.x  += p.vx;
     p.y  += p.vy;
     p.life -= p.decay;
@@ -759,62 +783,51 @@ initStars();
 
 // ===================== 物品物理与碰撞 =====================
 function updateItems(dt) {
-  const gravRange = blackHole.getGravityRange();
-
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
 
     // --- 车辆沿道路行驶 ---
     if (item.moveDir !== 0 && !item.attracted) {
-      // 转弯冷却
       if (item.turnCooldown > 0) item.turnCooldown--;
 
-      // 在路口且冷却结束：可随机变道
       if (item.turnCooldown <= 0 && isAtIntersection(item.x, item.y)) {
         if (Math.random() < 0.25) {
-          // 切换道路方向
           item.roadDir = item.roadDir === 'h' ? 'v' : 'h';
           item.turnCooldown = 40;
         }
       }
 
-      // 沿道路方向移动，锁定在道路中心线上
       if (item.roadDir === 'h') {
         item.x += item.moveDir * item.moveSpeed;
-        // 到达世界边缘掉头
-        if (item.x < 30 || item.x > WORLD_W - 30) {
-          item.moveDir *= -1;
-        }
+        if (item.x < 30 || item.x > WORLD_W - 30) item.moveDir *= -1;
       } else {
         item.y += item.moveDir * item.moveSpeed;
-        // 到达世界边缘掉头
-        if (item.y < 30 || item.y > WORLD_H - 30) {
-          item.moveDir *= -1;
-        }
+        if (item.y < 30 || item.y > WORLD_H - 30) item.moveDir *= -1;
       }
     }
 
-    // --- 引力吸附逻辑 ---
-    const dx = blackHole.x - item.x;
-    const dy = blackHole.y - item.y;
-    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    // --- 引力吸附逻辑（对所有黑洞） ---
+    item.attracted = false;
+    for (const bh of blackHoles) {
+      const dx = bh.x - item.x;
+      const dy = bh.y - item.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const gravRange = bh.getGravityRange();
 
-    if (dist < gravRange && blackHole.radius >= item.minRadius) {
-      item.attracted = true;
-      // 引力强度随距离衰减
-      const force = PULL_STRENGTH * (1 - dist / gravRange);
-      item.vx += (dx / dist) * force;
-      item.vy += (dy / dist) * force;
-      // 被吸引时旋转加速
-      item.rotSpeed += 0.005;
-    }
+      if (dist < gravRange && bh.radius >= item.minRadius) {
+        item.attracted = true;
+        const force = PULL_STRENGTH * (1 - dist / gravRange);
+        item.vx += (dx / dist) * force;
+        item.vy += (dy / dist) * force;
+        item.rotSpeed += 0.005;
+      }
 
-    // --- 减分建筑斥力场（推开靠近的黑洞） ---
-    if (item.type === 'penalty_building' && dist < PENALTY_REPEL_RANGE && !item.attracted) {
-      const repelStrength = PENALTY_REPEL_FORCE * (1 - dist / PENALTY_REPEL_RANGE);
-      // 推力方向：从建筑指向黑洞（推开黑洞）
-      blackHole.vx += (dx / dist) * repelStrength;
-      blackHole.vy += (dy / dist) * repelStrength;
+      // --- 减分建筑斥力场（推开靠近的黑洞） ---
+      if (item.type === 'penalty_building' && dist < PENALTY_REPEL_RANGE) {
+        const repelStrength = PENALTY_REPEL_FORCE * (1 - dist / PENALTY_REPEL_RANGE);
+        bh.vx += (dx / dist) * repelStrength;
+        bh.vy += (dy / dist) * repelStrength;
+      }
     }
 
     // 应用速度
@@ -822,7 +835,6 @@ function updateItems(dt) {
       item.x += item.vx;
       item.y += item.vy;
       item.rotation += item.rotSpeed;
-      // 摩擦
       item.vx *= 0.98;
       item.vy *= 0.98;
     }
@@ -830,44 +842,48 @@ function updateItems(dt) {
     // --- 限时物品倒计时 ---
     if (item.isLimited) {
       item.timeLeft -= dt;
-      // 更新闪烁透明度（剩余时间越少闪烁越快）
       const flashSpeed = item.timeLeft > 2 ? 4 : 10;
       item.alpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(item.timeLeft * flashSpeed));
 
       if (item.timeLeft <= 0) {
-        // 消失惩罚：扣除分数
         const penalty = Math.round(item.score * 0.5);
         score = Math.max(0, score - penalty);
-        // 消失粒子（红色碎裂效果）
         spawnAbsorbParticles(item.x, item.y, '#ff5252', 18);
         items.splice(i, 1);
         continue;
       }
     }
 
-    // --- 吞噬检测 ---
-    if (dist < blackHole.radius * ABSORB_RATIO && blackHole.radius >= item.minRadius) {
-      // ★ 减分建筑特殊处理：施加惩罚，不执行正常吞噬流程
+    // --- 吞噬检测（检查所有黑洞，取最近可吞噬的） ---
+    let absorbingBh = null;
+    let closestDist = Infinity;
+    for (const bh of blackHoles) {
+      const dx = bh.x - item.x;
+      const dy = bh.y - item.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (dist < bh.radius * ABSORB_RATIO && bh.radius >= item.minRadius && dist < closestDist) {
+        closestDist = dist;
+        absorbingBh = bh;
+      }
+    }
+
+    if (absorbingBh) {
+      // ★ 减分建筑：触发分裂，不扣分不惩罚
       if (item.type === 'penalty_building') {
         camera.shake(item.size * 0.8);
         spawnAbsorbParticles(item.x, item.y, '#ff0000', 35);
         spawnAbsorbParticles(item.x, item.y, '#8b0000', 20);
-        blackHole.applyPenalty();
+        splitBlackHole(absorbingBh);
         items.splice(i, 1);
         continue;
       }
-      // 大型物品触发屏幕震动
       if (item.size > SHAKE_THRESHOLD) {
         camera.shake(item.size * 0.5);
       }
-      // 生成粒子效果
       const particleCount = item.category === 'large' ? 25 : item.category === 'medium' ? 12 : 6;
       spawnAbsorbParticles(item.x, item.y, item.color, particleCount);
-      // 黑洞增长
-      blackHole.grow(item.size, item.score);
-      // ★ 记录该物品类型已被吞噬（用于胜利判定）
+      absorbingBh.grow(item.size, item.score);
       absorbedTypes.add(item.type);
-      // 移除物品
       items.splice(i, 1);
     }
   }
@@ -1009,10 +1025,10 @@ function drawGround() {
 /** 绘制星空（黑洞变大后出现，或彩虹模式） */
 function drawStars() {
   const isRainbow = score >= RAINBOW_SCORE;
-  if (blackHole.radius < STAR_THRESHOLD && !isRainbow) return;
+  if (getMaxBlackHoleRadius() < STAR_THRESHOLD && !isRainbow) return;
   const baseAlpha = isRainbow
     ? 0.35
-    : Math.min(1, (blackHole.radius - STAR_THRESHOLD) / 60);
+    : Math.min(1, (getMaxBlackHoleRadius() - STAR_THRESHOLD) / 60);
   for (const star of stars) {
     star.twinkle += 0.03;
     const a = baseAlpha * (0.5 + 0.5 * Math.sin(star.twinkle));
@@ -1604,19 +1620,12 @@ function drawItem(item) {
 }
 
 /** 绘制黑洞 */
-function drawBlackHole(dt) {
-  const { x, y, radius } = blackHole;
-  const gravRange = blackHole.getGravityRange();
+function drawBlackHole(bh) {
+  const { x, y, radius } = bh;
+  const gravRange = bh.getGravityRange();
   const isRainbow = score >= RAINBOW_SCORE;
 
-  // 彩虹模式旋转速度翻倍（基于实际帧时间累加）
-  let rotation;
-  if (isRainbow) {
-    blackHole.rotation += (0.02 + blackHole.radius * 0.0001);
-    rotation = blackHole.rotation;
-  } else {
-    rotation = blackHole.rotation;
-  }
+  let rotation = bh.rotation;
 
   // --- 引力范围光圈（彩虹模式扩大范围） ---
   const glowRange = isRainbow ? gravRange * 1.35 : gravRange;
@@ -1812,10 +1821,11 @@ function shadeColor(hex, percent) {
 // ===================== 背景变暗效果 =====================
 function drawDarkOverlay() {
   const isRainbow = score >= RAINBOW_SCORE;
-  if (blackHole.radius < STAR_THRESHOLD && !isRainbow) return;
+  const maxR = getMaxBlackHoleRadius();
+  if (maxR < STAR_THRESHOLD && !isRainbow) return;
   const baseAlpha = isRainbow
-    ? Math.max(0.4, Math.min(0.55, (blackHole.radius - STAR_THRESHOLD) / 200))
-    : Math.min(0.5, (blackHole.radius - STAR_THRESHOLD) / 200);
+    ? Math.max(0.4, Math.min(0.55, (maxR - STAR_THRESHOLD) / 200))
+    : Math.min(0.5, (maxR - STAR_THRESHOLD) / 200);
   ctx.fillStyle = `rgba(0,0,0,${baseAlpha})`;
   ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 }
@@ -1832,7 +1842,7 @@ function drawWorldBorder() {
 // ===================== HUD 更新 =====================
 function updateHUD() {
   hudScore.textContent = score;
-  hudRadius.textContent = Math.round(blackHole.radius);
+  hudRadius.textContent = Math.round(getMaxBlackHoleRadius());
 
   // 胜利后不再更新倒计时显示
   if (gameState === 'over' && timeLeft > 0) {
@@ -1886,7 +1896,7 @@ function gameLoop(timestamp) {
   updateEdgeRemoval(dt);
 
   // 更新逻辑
-  blackHole.update(dt);
+  for (const bh of blackHoles) bh.update(dt);
   updateItems(dt);
   updateParticles();
   camera.update();
@@ -1906,10 +1916,11 @@ function gameLoop(timestamp) {
 
   // 按大小排序物品（小的先画，大的后画，形成遮挡）
   const sortedItems = [...items].sort((a, b) => a.size - b.size);
+  const maxBhRadius = getMaxBlackHoleRadius();
 
-  // 绘制物品（比黑洞小的先画，比黑洞大的后画）
+  // 绘制物品（比最大黑洞小的先画，比最大黑洞大的后画）
   for (const item of sortedItems) {
-    if (item.size <= blackHole.radius) {
+    if (item.size <= maxBhRadius) {
       drawItem(item);
     }
   }
@@ -1917,12 +1928,12 @@ function gameLoop(timestamp) {
   // 绘制引力尾迹
   drawAttractTrails();
 
-  // 绘制黑洞
-  drawBlackHole(dt);
+  // 绘制所有黑洞
+  for (const bh of blackHoles) drawBlackHole(bh);
 
-  // 绘制比黑洞大的物品（遮挡黑洞）
+  // 绘制比最大黑洞大的物品（遮挡黑洞）
   for (const item of sortedItems) {
-    if (item.size > blackHole.radius) {
+    if (item.size > maxBhRadius) {
       drawItem(item);
     }
   }
@@ -1954,20 +1965,13 @@ function startGame() {
   gemSpawnAcc = 0;
   edgeRemovalAcc = 0;
   edgeRemovalActive = false;
-  speedDebuffTimer = 0;
 
   // 重置黑洞
-  blackHole.x = WORLD_W / 2;
-  blackHole.y = WORLD_H / 2;
-  blackHole.radius = 20;
-  blackHole.speed = BASE_SPEED;
-  blackHole.rotation = 0;
-  blackHole.vx = 0;
-  blackHole.vy = 0;
+  blackHoles = [createBlackHole(WORLD_W / 2, WORLD_H / 2)];
 
   // 重置相机
-  camera.x = blackHole.x - canvas.width / 2;
-  camera.y = blackHole.y - canvas.height / 2;
+  camera.x = blackHoles[0].x - canvas.width / 2;
+  camera.y = blackHoles[0].y - canvas.height / 2;
   camera.shakeIntensity = 0;
 
   // ★ 预计算街区矩形（路网渲染用）
@@ -2003,7 +2007,7 @@ function endGame(isWin = false) {
 
   // 填充结算数据
   document.getElementById('final-score').textContent  = score;
-  document.getElementById('final-radius').textContent = Math.round(blackHole.radius);
+  document.getElementById('final-radius').textContent = Math.round(getMaxBlackHoleRadius());
   document.getElementById('final-count').textContent  = absorbCount;
 
   // ★ 根据胜败显示不同标题与提示（兼容 HTML 中可能没有这些元素的情况）
