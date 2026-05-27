@@ -397,7 +397,7 @@ const ITEM_TYPES = {
   fence:     { category: 'medium', baseSize: 8,  score: 8,   color: '#bcaaa4', minRadius: 10 },
 
   // 限时高价值物品
-  gem:       { category: 'medium', baseSize: 15, score: 150, color: '#e040fb', minRadius: 0, isLimited: true },
+  gem:       { category: 'medium', baseSize: 45, score: 150, color: '#e040fb', minRadius: 0, isLimited: true },
 
   // 大型物品 - 需要很大的黑洞
   house:     { category: 'large',  baseSize: 30, score: 50,  color: '#78909c', minRadius: 28 },
