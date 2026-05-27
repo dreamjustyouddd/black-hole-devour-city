@@ -30,7 +30,7 @@ const PENALTY_BUILDING_SIZE = 105;// 减分建筑基础尺寸（约大厦1.5倍�
 const PENALTY_REPEL_RANGE   = 260;// 斥力场范围（像素）
 const PENALTY_REPEL_FORCE   = 0.18;// 斥力场强度
 const MAX_BLACK_HOLES       = 4;  // 黑洞最大数量（防止指数爆炸）
-const SPLIT_OFFSET          = 60; // 分裂时两个黑洞的间距
+const SPLIT_OFFSET          = 120;// 分裂时两个黑洞的间距
 
 /** 根据时间偏移返回 HSL 彩虹色字符串 */
 function rainbowColor(timeOffset, alpha = 1) {
